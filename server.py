@@ -214,6 +214,9 @@ def repliers_get(params: dict) -> dict:
             "Add it in Railway → Settings → Variables."
         )
     clean = {k: v for k, v in params.items() if v is not None}
+    # Repliers rejects minPrice=0 — omit when zero or negative
+    if "minPrice" in clean and safe_float(clean["minPrice"]) <= 0:
+        del clean["minPrice"]
     try:
         resp = get_session().get(REPLIERS_BASE, params=clean, timeout=20)
         if resp.status_code == 401:
@@ -562,30 +565,37 @@ def handle_get_market_stats(args: dict) -> dict:
     output: dict = {}
 
     def fetch_city_stats(c: str) -> tuple[str, dict]:
+        # Repliers' statistics param requires specific stat names; simpler and
+        # more portable to aggregate a page of listings client-side.
         active_data = repliers_get({
             "city": c, "status": "A",
-            "statistics": "true", "resultsPerPage": 0,
+            "resultsPerPage": 100,
+            "fields": "listPrice,daysOnMarket",
         })
-        ast = active_data.get("statistics") or {}
+        active = active_data.get("listings", []) or []
 
         min_date     = (datetime.today() - timedelta(days=90)).strftime("%Y-%m-%d")
         expired_data = repliers_get({
             "city": c, "status": "U", "lastStatus": "Exp",
             "minUnavailableDate": min_date,
-            "statistics": "true", "resultsPerPage": 0,
+            "resultsPerPage": 100,
+            "fields": "listPrice,daysOnMarket",
         })
-        est = expired_data.get("statistics") or {}
+        expired = expired_data.get("listings", []) or []
 
-        def avg(s: dict, key: str) -> int:
-            return safe_round((s.get(key) or {}).get("avg"))
+        def avg_of(rows: list, key: str) -> int:
+            vals = [safe_float(r.get(key)) for r in rows]
+            vals = [v for v in vals if v > 0]
+            return safe_round(sum(vals) / len(vals)) if vals else 0
 
         return c, {
             "active_count":      active_data.get("count", 0),
-            "avg_active_price":  avg(ast, "listPrice"),
-            "avg_active_dom":    avg(ast, "daysOnMarket"),
+            "avg_active_price":  avg_of(active, "listPrice"),
+            "avg_active_dom":    avg_of(active, "daysOnMarket"),
             "expired_90d_count": expired_data.get("count", 0),
-            "avg_expired_price": avg(est, "listPrice"),
-            "avg_expired_dom":   avg(est, "daysOnMarket"),
+            "avg_expired_price": avg_of(expired, "listPrice"),
+            "avg_expired_dom":   avg_of(expired, "daysOnMarket"),
+            "sample_size_note":  "averages from up to 100 listings per group",
         }
 
     with ThreadPoolExecutor(max_workers=len(cities)) as pool:
