@@ -18,7 +18,7 @@
 | Compliance site | `https://gtascout.ca` (Cloudflare Pages project `wild-mountain-9809`) |
 | Domain registrar | Cloudflare |
 | Repliers plan | **Standard ($199/mo)** — active |
-| Real data status | **Paid plan active, but ITSO data feed not yet provisioned.** Currently returns Preview-tier sample data. Real Halton listings flow the moment Broker of Record signs off on the ITSO agreement. |
+| Real data status | **LIVE as of 2026-07-21.** Broker of Record approved, ITSO provisioned IDX + VOW, and the correct production API key is now set in Railway. Verified via `get_market_stats` / `search_pos_listings`: Burlington 685 active listings (avg $1.12M), Oakville 335 active (avg $1.37M), Milton 111 active, Halton Hills 24 active — real Halton market figures, not sample data. |
 
 ### Env vars in production
 
@@ -61,9 +61,11 @@ However, `HALTON_CITIES` in the code still includes all four (Burlington/Milton/
 
 ### Feed status
 
-- **IDX** — free, agreement submitted, pending broker approval
-- **Office Active Listings** — free, agreement submitted, pending broker approval
-- **VOW** — **planned. Will be added once the first paying customer covers the $1,500/yr cost.** VOW provides expired/sold historical data; without it, `search_expired_listings` will return empty on real data. This is the sequencing Faisal has chosen.
+- **IDX** — **Active.** Broker approved, ITSO provisioned, live as of 2026-07-21.
+- **VOW** — **Active.** Provisioned alongside IDX (originally planned to wait until a paying customer covered the $1,500/yr cost, but ended up bundled in with the ITSO approval). VOW provides expired/sold historical data — `search_expired_listings` should now return real data.
+- **Office Active Listings** — status not independently re-verified since the key swap; check the Repliers portal if `get_market_stats`/active-listing tools look incomplete for a given city.
+
+**Ops note:** on first going live, the deployed `REPLIERS_API_KEY` in Railway (`accurate-fulfillment` → `gta-scout-mcp` → Variables) did not match the key ITSO IDX/VOW were actually linked to in the Repliers portal — the server kept silently returning Preview-tier sample data (unrealistic prices/DOM, 0 listings in some cities) even after the boards showed "Active." `repliers_ping: true` on `/health` does NOT prove real data is flowing — it only confirms the key authenticates. If real data ever appears to regress back to sample-looking numbers, re-check that Railway's `REPLIERS_API_KEY` still matches the key linked to the active ITSO boards in the Repliers dashboard.
 
 ### Multi-tenant licensing constraint
 
@@ -226,12 +228,12 @@ Pure-Python 3.10+ stdlib + `requests` + `urllib3`. Single-file MCP server. No fr
 - Distress scoring engine (practitioner-calibrated)
 - Live compliance website at gtascout.ca
 - Repliers Standard subscription active
-- ITSO data agreement submitted (IDX + Office Active)
+- Broker of Record approval + ITSO IDX/VOW feed provisioning — **live and verified 2026-07-21** (real Halton listings and distress-scored POS results confirmed via direct tool calls)
 - 6 rounds of engineering hardening (soak-tested 315 req/s, 0 failures)
 
 **In flight:**
-- Broker of Record approval on ITSO agreement
-- Repliers feed provisioning (auto-flows once broker signs)
+- Delete duplicate Railway project `empathetic-reverence` (zero env vars, dead weight from a mistaken second deploy click)
+- Independently re-verify Office Active Listings feed status post key-swap
 
 **Priority order for next builds (per Faisal):**
 
