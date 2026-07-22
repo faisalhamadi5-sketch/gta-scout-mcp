@@ -675,6 +675,24 @@ TOOLS = [
             "required": ["city"],
         },
     },
+    {
+        "name": "search_sold_listings",
+        "description": (
+            "Search sold listings in a single Halton city within a lookback window. "
+            "Returns sold price alongside original list price — useful for comps and "
+            "underwriting against recent closed deals."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "city":        {"type": "string", "description": "City to search, e.g. Burlington"},
+                "min_price":   {"type": "number",  "description": "Minimum list price", "default": 0},
+                "max_price":   {"type": "number",  "description": "Maximum list price", "default": 9999999},
+                "months_back": {"type": "integer", "description": "How many months back to look for sold listings (default 6)", "default": 6},
+            },
+            "required": ["city"],
+        },
+    },
 ]
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
@@ -859,12 +877,42 @@ def handle_search_active_listings(args: dict) -> dict:
     return {"count": len(listings), "listings": [l.to_dict() for l in listings]}
 
 
+def handle_search_sold(args: dict) -> dict:
+    city        = safe_str(args.get("city")).strip()
+    min_price   = safe_int(args.get("min_price"), 0)
+    max_price   = safe_int(args.get("max_price"), 9999999)
+    months_back = max(1, safe_int(args.get("months_back"), 6))
+
+    if not city:
+        return {"error": "city is required", "count": 0, "listings": []}
+
+    min_date = (datetime.today() - timedelta(days=months_back * 30)).strftime("%Y-%m-%d")
+
+    params: dict = {
+        "city":               city,
+        "status":             "U",
+        "lastStatus":         "Sld",
+        "minUnavailableDate": min_date,
+        "minPrice":           min_price,
+        "maxPrice":           max_price,
+        "resultsPerPage":     50,
+        "sortBy":             "updatedOnDesc",
+        "fields":             LISTING_FIELDS,
+    }
+
+    raw      = repliers_get_all(params, max_pages=5)
+    listings = [normalize(l) for l in raw]
+    listings.sort(key=lambda x: x.price)
+    return {"count": len(listings), "listings": [l.to_dict() for l in listings]}
+
+
 HANDLERS: dict[str, Any] = {
     "search_expired_listings": handle_search_expired,
     "search_pos_listings":     handle_search_pos,
     "search_development_land": handle_search_dev_land,
     "get_market_stats":        handle_get_market_stats,
     "search_active_listings":  handle_search_active_listings,
+    "search_sold_listings":    handle_search_sold,
 }
 
 # ── MCP JSON-RPC protocol ─────────────────────────────────────────────────────
