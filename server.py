@@ -77,7 +77,7 @@ HALTON_CITIES = ["Burlington", "Milton", "Oakville", "Halton Hills"]
 
 LISTING_FIELDS = (
     "mlsNumber,listPrice,soldPrice,daysOnMarket,numBedrooms,numBathrooms,"
-    "status,lastStatus,address,details,map,timestamps,publicRemarks,office"
+    "status,lastStatus,address,details,map,timestamps,publicRemarks,office,lot"
 )
 
 # Module-level keyword constants
@@ -458,6 +458,9 @@ class Listing:
     brokerage: str
     is_pos: bool
     is_dev: bool
+    lot_width: float
+    lot_depth: float
+    lot_size: str
     distress_score: int = 0
     distress_tier: str = "MINIMAL"
     distress_reasons: list = field(default_factory=list)
@@ -474,6 +477,7 @@ def normalize(l: dict) -> Listing:
     ts      = l.get("timestamps") or {}
     map_    = l.get("map")        or {}
     office  = l.get("office")     or {}
+    lot     = l.get("lot")        or {}
 
     remarks = (
         safe_str(l.get("publicRemarks")).upper() + " " +
@@ -514,6 +518,9 @@ def normalize(l: dict) -> Listing:
         brokerage         = safe_str(office.get("brokerageName")),
         is_pos            = any(kw in remarks for kw in POS_KEYWORDS),
         is_dev            = any(kw in remarks for kw in DEV_KEYWORDS),
+        lot_width         = safe_float(lot.get("width")),
+        lot_depth         = safe_float(lot.get("depth")),
+        lot_size          = safe_str(lot.get("size")),
         distress_score    = score,
         distress_tier     = distress_tier(score),
         distress_reasons  = reasons,
@@ -644,6 +651,46 @@ TOOLS = [
                 "city": {"type": "string", "description": "City to summarise. Blank = all Halton.", "default": ""},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "search_active_listings",
+        "description": (
+            "Search listings in a single Halton city with optional lot-frontage filtering "
+            "(min/max lot width in feet, as reported by Repliers' 'lot' object). "
+            "Useful for land-scouting queries like '100 ft frontage lots in Burlington'. "
+            "Lot data is not populated on every listing — records without it are excluded "
+            "when a frontage filter is applied."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "city":            {"type": "string", "description": "City to search, e.g. Burlington"},
+                "min_price":       {"type": "number", "description": "Minimum list price", "default": 0},
+                "max_price":       {"type": "number", "description": "Maximum list price", "default": 9999999},
+                "min_frontage_ft": {"type": "number", "description": "Minimum lot frontage/width in feet. 0 = no filter.", "default": 0},
+                "max_frontage_ft": {"type": "number", "description": "Maximum lot frontage/width in feet. 0 = no filter.", "default": 0},
+                "status":          {"type": "string", "description": "A=active only, U=expired only, blank=both", "default": "A"},
+            },
+            "required": ["city"],
+        },
+    },
+    {
+        "name": "search_sold_listings",
+        "description": (
+            "Search sold listings in a single Halton city within a lookback window. "
+            "Returns sold price alongside original list price — useful for comps and "
+            "underwriting against recent closed deals."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "city":        {"type": "string", "description": "City to search, e.g. Burlington"},
+                "min_price":   {"type": "number",  "description": "Minimum list price", "default": 0},
+                "max_price":   {"type": "number",  "description": "Maximum list price", "default": 9999999},
+                "months_back": {"type": "integer", "description": "How many months back to look for sold listings (default 6)", "default": 6},
+            },
+            "required": ["city"],
         },
     },
 ]
@@ -794,11 +841,78 @@ def handle_get_market_stats(args: dict) -> dict:
     return output
 
 
+def handle_search_active_listings(args: dict) -> dict:
+    city         = safe_str(args.get("city")).strip()
+    min_price    = safe_int(args.get("min_price"), 0)
+    max_price    = safe_int(args.get("max_price"), 9999999)
+    min_frontage = safe_float(args.get("min_frontage_ft"), 0)
+    max_frontage = safe_float(args.get("max_frontage_ft"), 0)
+    status       = safe_str(args.get("status"), "A")
+
+    if not city:
+        return {"error": "city is required", "count": 0, "listings": []}
+
+    params: dict = {
+        "city":           city,
+        "minPrice":       min_price,
+        "maxPrice":       max_price,
+        "resultsPerPage": 50,
+        "sortBy":         "listPriceAsc",
+        "fields":         LISTING_FIELDS,
+    }
+    params["status"] = status if status else ["A", "U"]
+
+    raw      = repliers_get_all(params, max_pages=5)
+    listings = [normalize(l) for l in raw]
+
+    if min_frontage > 0 or max_frontage > 0:
+        listings = [
+            l for l in listings
+            if l.lot_width > 0
+            and (min_frontage <= 0 or l.lot_width >= min_frontage)
+            and (max_frontage <= 0 or l.lot_width <= max_frontage)
+        ]
+
+    listings.sort(key=lambda x: x.price)
+    return {"count": len(listings), "listings": [l.to_dict() for l in listings]}
+
+
+def handle_search_sold(args: dict) -> dict:
+    city        = safe_str(args.get("city")).strip()
+    min_price   = safe_int(args.get("min_price"), 0)
+    max_price   = safe_int(args.get("max_price"), 9999999)
+    months_back = max(1, safe_int(args.get("months_back"), 6))
+
+    if not city:
+        return {"error": "city is required", "count": 0, "listings": []}
+
+    min_date = (datetime.today() - timedelta(days=months_back * 30)).strftime("%Y-%m-%d")
+
+    params: dict = {
+        "city":               city,
+        "status":             "U",
+        "lastStatus":         "Sld",
+        "minUnavailableDate": min_date,
+        "minPrice":           min_price,
+        "maxPrice":           max_price,
+        "resultsPerPage":     50,
+        "sortBy":             "updatedOnDesc",
+        "fields":             LISTING_FIELDS,
+    }
+
+    raw      = repliers_get_all(params, max_pages=5)
+    listings = [normalize(l) for l in raw]
+    listings.sort(key=lambda x: x.price)
+    return {"count": len(listings), "listings": [l.to_dict() for l in listings]}
+
+
 HANDLERS: dict[str, Any] = {
     "search_expired_listings": handle_search_expired,
     "search_pos_listings":     handle_search_pos,
     "search_development_land": handle_search_dev_land,
     "get_market_stats":        handle_get_market_stats,
+    "search_active_listings":  handle_search_active_listings,
+    "search_sold_listings":    handle_search_sold,
 }
 
 # ── MCP JSON-RPC protocol ─────────────────────────────────────────────────────
